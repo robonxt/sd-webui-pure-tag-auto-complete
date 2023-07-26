@@ -8,7 +8,7 @@ class LoraParser extends BaseTagParser {
         if (tagword !== "<" && tagword !== "<l:" && tagword !== "<lora:") {
             let searchTerm = tagword.replace("<lora:", "").replace("<l:", "").replace("<", "");
             let filterCondition = x => x.toLowerCase().includes(searchTerm) || x.toLowerCase().replaceAll(" ", "_").includes(searchTerm);
-            tempResults = loras.filter(x => filterCondition(x)); // Filter by tagword
+            tempResults = loras.filter(x => filterCondition(x[0])); // Filter by tagword
         } else {
             tempResults = loras;
         }
@@ -16,8 +16,9 @@ class LoraParser extends BaseTagParser {
         // Add final results
         let finalResults = [];
         tempResults.forEach(t => {
-            let result = new AutocompleteResult(t.trim(), ResultType.lora)
+            let result = new AutocompleteResult(t[0].trim(), ResultType.lora)
             result.meta = "Lora";
+            result.hash = t[1];
             finalResults.push(result);
         });
 
@@ -28,18 +29,28 @@ class LoraParser extends BaseTagParser {
 async function load() {
     if (loras.length === 0) {
         try {
-            loras = (await readFile(`${tagBasePath}/temp/lora.txt`)).split("\n")
-                .filter(x => x.trim().length > 0) // Remove empty lines
-                .map(x => x.trim()); // Remove carriage returns and padding if it exists
+            loras = (await loadCSV(`${tagBasePath}/temp/lora.txt`))
+                .filter(x => x[0]?.trim().length > 0) // Remove empty lines
+                .map(x => [x[0]?.trim(), x[1]]); // Trim filenames and return the name, hash pairs
         } catch (e) {
             console.error("Error loading lora.txt: " + e);
         }
     }
 }
 
-function sanitize(tagType, text) {
+async function sanitize(tagType, text) {
     if (tagType === ResultType.lora) {
-        return `<lora:${text}:${TAC_CFG.extraNetworksDefaultMultiplier}>`;
+        let multiplier = TAC_CFG.extraNetworksDefaultMultiplier;
+        let info = await fetchAPI(`tacapi/v1/lora-info/${text}`)
+        if (info && info["preferred weight"]) {
+            multiplier = info["preferred weight"];
+        }
+
+        const lastDot = text.lastIndexOf(".");
+        const lastSlash = text.lastIndexOf("/");
+        const name = text.substring(lastSlash + 1, lastDot);
+
+        return `<lora:${name}:${multiplier}>`;
     }
     return null;
 }
