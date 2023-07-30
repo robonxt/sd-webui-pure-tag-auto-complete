@@ -13,12 +13,35 @@ class WildcardParser extends BaseTagParser {
         let wcWord = wcMatch[0][2];
 
         // Look in normal wildcard files
-        let wcFound = wildcardFiles.find(x => x[1].toLowerCase() === wcFile);
+        let wcFound = wildcardFiles.filter(x => x[1].toLowerCase() === wcFile);
+        if (wcFound.length === 0) wcFound = null;
         // Use found wildcard file or look in external wildcard files
-        let wcPair = wcFound || wildcardExtFiles.find(x => x[1].toLowerCase() === wcFile);
+        let wcPairs = wcFound || wildcardExtFiles.filter(x => x[1].toLowerCase() === wcFile);
 
-        let wildcards = (await readFile(`${wcPair[0]}/${wcPair[1]}.txt`)).split("\n")
-            .filter(x => x.trim().length > 0 && !x.startsWith('#'));  // Remove empty lines and comments
+        if (!wcPairs) return [];
+    
+        let wildcards = [];
+        for (let i = 0; i < wcPairs.length; i++) {
+            const wcPair = wcPairs[i];
+            if (!wcPair[0] || !wcPair[1]) continue;
+
+            if (wcPair[0].endsWith(".yaml")) {
+                const getDescendantProp = (obj, desc) => {
+                    const arr = desc.split("/");
+                    while (arr.length) {
+                      obj = obj[arr.shift()];
+                    }
+                    return obj;
+                }
+                wildcards = wildcards.concat(getDescendantProp(yamlWildcards[wcPair[0]], wcPair[1]));
+            } else {
+                const fileContent = (await readFile(`${wcPair[0]}/${wcPair[1]}.txt`)).split("\n")
+                .filter(x => x.trim().length > 0 && !x.startsWith('#'));  // Remove empty lines and comments
+                wildcards = wildcards.concat(fileContent);
+            }
+        }
+
+        wildcards.sort((a, b) => a.localeCompare(b));
 
         let finalResults = [];
         let tempResults = wildcards.filter(x => (wcWord !== null && wcWord.length > 0) ? x.toLowerCase().includes(wcWord) : x) // Filter by tagword
@@ -44,12 +67,26 @@ class WildcardFileParser extends BaseTagParser {
         }
 
         let finalResults = [];
+        const alreadyAdded = new Map();
         // Get final results
         tempResults.forEach(wcFile => {
-            let result = new AutocompleteResult(wcFile[1].trim(), ResultType.wildcardFile);
-            result.meta = "Wildcard file";
+            // Skip duplicate entries incase multiple files have the same name or yaml category
+            if (alreadyAdded.has(wcFile[1])) return;
+
+            let result = null;
+            if (wcFile[0].endsWith(".yaml")) {
+                result = new AutocompleteResult(wcFile[1].trim(), ResultType.yamlWildcard);
+                result.meta = "YAML wildcard collection";
+            } else {
+                result = new AutocompleteResult(wcFile[1].trim(), ResultType.wildcardFile);
+                result.meta = "Wildcard file";
+            }
+                
             finalResults.push(result);
+            alreadyAdded.set(wcFile[1], true);
         });
+
+        finalResults.sort((a, b) => a.text.localeCompare(b.text));
 
         return finalResults;
     }
@@ -87,6 +124,17 @@ async function load() {
                 wcExtFile = wcExtFile.map(x => [base, x]);
                 wildcardExtFiles.push(...wcExtFile);
             }
+
+            // Load the yaml wildcard json file and append it as a wildcard file, appending each key as a path component until we reach the end
+            yamlWildcards = await readFile(`${tagBasePath}/temp/wc_yaml.json`, true);
+            
+            // Append each key as a path component until we reach a leaf
+            Object.keys(yamlWildcards).forEach(file => {
+                const flattened = flatten(yamlWildcards[file], [], "/");
+                Object.keys(flattened).forEach(key => {
+                    wildcardExtFiles.push([file, key]);
+                });
+            });
         } catch (e) {
             console.error("Error loading wildcards: " + e);
         }
@@ -94,7 +142,7 @@ async function load() {
 }
 
 function sanitize(tagType, text) {
-    if (tagType === ResultType.wildcardFile) {
+    if (tagType === ResultType.wildcardFile || tagType === ResultType.yamlWildcard) {
         return `__${text}__`;
     } else if (tagType === ResultType.wildcardTag) {
         return text.replace(/^.*?: /g, "");
@@ -104,7 +152,7 @@ function sanitize(tagType, text) {
 
 function keepOpenIfWildcard(tagType, sanitizedText, newPrompt, textArea) {
     // If it's a wildcard, we want to keep the results open so the user can select another wildcard
-    if (tagType === ResultType.wildcardFile) {
+    if (tagType === ResultType.wildcardFile || tagType === ResultType.yamlWildcard) {
         hideBlocked = true;
         autocomplete(textArea, newPrompt, sanitizedText);
         setTimeout(() => { hideBlocked = false; }, 450);
