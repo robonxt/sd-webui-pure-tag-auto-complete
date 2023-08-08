@@ -3,12 +3,13 @@
 
 import glob
 import json
+import urllib.parse
 from pathlib import Path
 
 import gradio as gr
 import yaml
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from modules import script_callbacks, sd_hijack, shared
 
 from scripts.model_keyword_support import (get_lora_simple_hash,
@@ -365,6 +366,7 @@ def on_ui_settings():
         "tac_useLoras": shared.OptionInfo(True, "Search for Loras"),
         "tac_useLycos": shared.OptionInfo(True, "Search for LyCORIS/LoHa"),
         "tac_showWikiLinks": shared.OptionInfo(False, "Show '?' next to tags, linking to its Danbooru or e621 wiki page").info("Warning: This is an external site and very likely contains NSFW examples!"),
+        "tac_showExtraNetworkPreviews": shared.OptionInfo(True, "Show preview thumbnails for extra networks if available"),
         # Insertion related settings
         "tac_replaceUnderscores": shared.OptionInfo(True, "Replace underscores with spaces on insertion"),
         "tac_escapeParentheses": shared.OptionInfo(True, "Escape parentheses on insertion"),
@@ -446,34 +448,61 @@ def on_ui_settings():
 script_callbacks.on_ui_settings(on_ui_settings)
 
 def api_tac(_: gr.Blocks, app: FastAPI):
-    async def get_json_info(path: Path):
-        if not path:
+    async def get_json_info(base_path: Path, filename: str = None):
+        if base_path is None or (not base_path.exists()):
             return json.dumps({})
         
         try:
-            if path is not None and path.exists() and path.parent.joinpath(path.stem + ".json").exists():
-                return FileResponse(path.parent.joinpath(path.stem + ".json").as_posix())
+            json_candidates = glob.glob(base_path.as_posix() + f"/**/{filename}.json", recursive=True)
+            if json_candidates is not None and len(json_candidates) > 0:
+                return FileResponse(json_candidates[0])
+        except Exception as e:
+            return json.dumps({"error": e})
+        
+    async def get_preview_thumbnail(base_path: Path, filename: str = None, blob: bool = False):
+        if base_path is None or (not base_path.exists()):
+            return json.dumps({})
+        
+        try:
+            img_glob = glob.glob(base_path.as_posix() + f"/**/{filename}.*", recursive=True)
+            img_candidates = [img for img in img_glob if Path(img).suffix in [".png", ".jpg", ".jpeg", ".webp", ".gif"]]
+            if img_candidates is not None and len(img_candidates) > 0:
+                if blob:
+                    return FileResponse(img_candidates[0])
+                else:
+                    return JSONResponse({"url": urllib.parse.quote(img_candidates[0])})
         except Exception as e:
             return json.dumps({"error": e})
 
-    @app.get("/tacapi/v1/lora-info/{folder}/{lora_name}")
-    async def get_lora_info_subfolder(folder, lora_name):
-        if LORA_PATH is None:
-            return json.dumps({})
-        return await get_json_info(LORA_PATH.joinpath(folder).joinpath(lora_name))
-    
-    @app.get("/tacapi/v1/lyco-info/{folder}/{lyco_name}")
-    async def get_lyco_info_subfolder(folder, lyco_name):
-        if LYCO_PATH is None:
-            return json.dumps({})
-        return await get_json_info(LYCO_PATH.joinpath(folder).joinpath(lyco_name))
-
     @app.get("/tacapi/v1/lora-info/{lora_name}")
     async def get_lora_info(lora_name):
-        return await get_lora_info_subfolder(".", lora_name)
+        return await get_json_info(LORA_PATH, lora_name)
     
     @app.get("/tacapi/v1/lyco-info/{lyco_name}")
     async def get_lyco_info(lyco_name):
-        return await get_lyco_info_subfolder(".", lyco_name)
+        return await get_json_info(LYCO_PATH, lyco_name)
+    
+    def get_path_for_type(type):
+        if type == "lora":
+            return LORA_PATH
+        elif type == "lyco":
+            return LYCO_PATH
+        elif type == "hyper":
+            return HYP_PATH
+        elif type == "embed":
+            return EMB_PATH
+        else:
+            return None
+
+    @app.get("/tacapi/v1/thumb-preview/{filename}")
+    async def get_thumb_preview(filename, type):
+        return await get_preview_thumbnail(get_path_for_type(type), filename, False)
+    
+    @app.get("/tacapi/v1/thumb-preview-blob/{filename}")
+    async def get_thumb_preview_blob(filename, type):
+        return await get_preview_thumbnail(get_path_for_type(type), filename, True)
+        
+
+
 
 script_callbacks.on_app_started(api_tac)
