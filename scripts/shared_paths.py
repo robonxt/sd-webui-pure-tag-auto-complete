@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from modules import scripts, shared
 
 try:
@@ -37,6 +38,21 @@ except AttributeError:
 def find_ext_wildcard_paths():
     """Returns the path to the extension wildcards folder"""
     found = list(EXT_PATH.glob("*/wildcards/"))
+    # Try to find the wildcard path from the shared opts
+    try:
+        from modules.shared import opts
+    except ImportError:  # likely not in an a1111 context
+        opts = None
+
+    # Append custom wildcard paths
+    custom_paths = [
+        getattr(shared.cmd_opts, "wildcards_dir", None),    # Cmd arg from the wildcard extension
+        getattr(opts, "wildcard_dir", None),                # Custom path from sd-dynamic-prompts
+    ]
+    for path in [Path(p) for p in custom_paths if p is not None]:
+        if path.exists():
+            found.append(path)
+
     return found
 
 
