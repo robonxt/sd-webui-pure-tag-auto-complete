@@ -1,6 +1,7 @@
 # This helper script scans folders for wildcards and embeddings and writes them
 # to a temporary file to expose it to the javascript side
 
+import os
 import glob
 import json
 import urllib.parse
@@ -24,12 +25,45 @@ except Exception as e: # Not supported.
     load_textual_inversion_embeddings = lambda *args, **kwargs: None
     print("Tag Autocomplete: Cannot reload embeddings instantly:", e)
 
+# Sorting functions for extra networks / embeddings stuff
+sort_criteria = {
+    "Name": lambda path, name, subpath: name.lower() if subpath else path.stem.lower(),
+    "Date Modified (newest first)": lambda path, name, subpath: path.stat().st_mtime,
+    "Date Modified (oldest first)": lambda path, name, subpath: path.stat().st_mtime
+}
+
+def sort_models(model_list, sort_method = None, name_has_subpath = False):
+    """Sorts models according to the setting.
+    
+    Input: list of (full_path, display_name, {hash}) models. 
+    Returns models in the format of name, sort key, meta.
+    Meta is optional and can be a hash, version string or other required info.
+    """
+    if len(model_list) == 0:
+        return model_list
+
+    if sort_method is None:
+        sort_method = getattr(shared.opts, "tac_modelSortOrder", "Name")
+
+    # Get sorting method from dictionary
+    sorter = sort_criteria.get(sort_method, sort_criteria["Name"])
+
+    # During merging on the JS side we need to re-sort anyway, so here only the sort criteria are calculated.
+    # The list itself doesn't need to get sorted at this point.
+    if len(model_list[0]) > 2:
+        results = [f'{name},"{sorter(path, name, name_has_subpath)}",{meta}' for path, name, meta in model_list]
+    else:
+        results = [f'{name},"{sorter(path, name, name_has_subpath)}"' for path, name in model_list]
+    return results
+
+
 def get_wildcards():
     """Returns a list of all wildcards. Works on nested folders."""
     wildcard_files = list(WILDCARD_PATH.rglob("*.txt"))
-    resolved = [w.relative_to(WILDCARD_PATH).as_posix(
-    ) for w in wildcard_files if w.name != "put wildcards here.txt"]
-    return resolved
+    resolved = [(w, w.relative_to(WILDCARD_PATH).as_posix())
+                for w in wildcard_files
+                if w.name != "put wildcards here.txt"]
+    return sort_models(resolved, name_has_subpath=True)
 
 
 def get_ext_wildcards():
@@ -38,7 +72,10 @@ def get_ext_wildcards():
 
     for path in WILDCARD_EXT_PATHS:
         wildcard_files.append(path.as_posix())
-        wildcard_files.extend(p.relative_to(path).as_posix() for p in path.rglob("*.txt") if p.name != "put wildcards here.txt")
+        resolved = [(w, w.relative_to(path).as_posix())
+                    for w in path.rglob("*.txt")
+                    if w.name != "put wildcards here.txt"]
+        wildcard_files.extend(sort_models(resolved, name_has_subpath=True))
         wildcard_files.append("-----")
 
     return wildcard_files
@@ -52,11 +89,13 @@ def is_umi_format(data):
             break
     return not issue_found
 
-def parse_umi_format(umi_tags, count, data):
+count = 0
+def parse_umi_format(umi_tags, data):
+    global count
     for item in data:
         umi_tags[count] = ','.join(data[item]['Tags'])
         count += 1
-    
+
 
 def parse_dynamic_prompt_format(yaml_wildcards, data, path):
     # Recurse subkeys, delete those without string lists as values
@@ -66,7 +105,7 @@ def parse_dynamic_prompt_format(yaml_wildcards, data, path):
                 recurse_dict(value)
             elif not (isinstance(value, list) and all(isinstance(v, str) for v in value)):
                 del d[key]
-    
+
     recurse_dict(data)
     # Add to yaml_wildcards
     yaml_wildcards[path.name] = data
@@ -82,7 +121,6 @@ def get_yaml_wildcards():
     yaml_wildcards = {}
 
     umi_tags = {} # { tag: count }
-    count = 0
 
     for path in yaml_files:
         try:
@@ -90,21 +128,21 @@ def get_yaml_wildcards():
                 data = yaml.safe_load(file)
                 if (data):
                     if (is_umi_format(data)):
-                        parse_umi_format(umi_tags, count, data)
+                        parse_umi_format(umi_tags, data)
                     else:
                         parse_dynamic_prompt_format(yaml_wildcards, data, path)
                 else:
                     print('No data found in ' + path.name)
-        except yaml.YAMLError:
-            print('Issue in parsing YAML file ' + path.name)
+        except (yaml.YAMLError, UnicodeDecodeError) as e:
+            print(f'Issue in parsing YAML file {path.name}: {e}')
             continue
-    
+
     # Sort by count
     umi_sorted = sorted(umi_tags.items(), key=lambda item: item[1], reverse=True)
     umi_output = []
     for tag, count in umi_sorted:
         umi_output.append(f"{tag},{count}")
-    
+
     if (len(umi_output) > 0):
         write_to_temp_file('umi_tags.txt', umi_output)
 
@@ -136,14 +174,14 @@ def get_embeddings(sd_model):
 
         # Add embeddings to the correct list
         if (emb_a_shape == V1_SHAPE):
-            emb_v1 = list(emb_type_a.keys())
+            emb_v1 = [(Path(v.filename), k, "v1") for (k,v) in emb_type_a.items()]
         elif (emb_a_shape == V2_SHAPE):
-            emb_v2 = list(emb_type_a.keys())
+            emb_v2 = [(Path(v.filename), k, "v2") for (k,v) in emb_type_a.items()]
 
         if (emb_b_shape == V1_SHAPE):
-            emb_v1 = list(emb_type_b.keys())
+            emb_v1 = [(Path(v.filename), k, "v1") for (k,v) in emb_type_b.items()]
         elif (emb_b_shape == V2_SHAPE):
-            emb_v2 = list(emb_type_b.keys())
+            emb_v2 = [(Path(v.filename), k, "v2") for (k,v) in emb_type_b.items()]
 
         # Get shape of current model
         #vec = sd_model.cond_stage_model.encode_embedding_init_text(",", 1)
@@ -155,7 +193,7 @@ def get_embeddings(sd_model):
         #    results = [e + ",v2" for e in emb_v2] + [e + ",v1" for e in emb_v1]
         #else:
         #    raise AttributeError # Fallback to old method
-        results = sorted([e + ",v1" for e in emb_v1] + [e + ",v2" for e in emb_v2], key=lambda x: x.lower())
+        results = sort_models(emb_v1) + sort_models(emb_v2)
     except AttributeError:
         print("tag_autocomplete_helper: Old webui version or unrecognized model shape, using fallback for embedding completion.")
         # Get a list of all embeddings in the folder
@@ -173,9 +211,8 @@ def get_hypernetworks():
 
     # Get a list of all hypernetworks in the folder
     hyp_paths = [Path(h) for h in glob.glob(HYP_PATH.joinpath("**/*").as_posix(), recursive=True)]
-    all_hypernetworks = [str(h.name) for h in hyp_paths if h.suffix in {".pt"}]
-    # Remove file extensions
-    return sorted([h[:h.rfind('.')] for h in all_hypernetworks], key=lambda x: x.lower())
+    all_hypernetworks = [(h, h.stem) for h in hyp_paths if h.suffix in {".pt"}]
+    return sort_models(all_hypernetworks)
 
 model_keyword_installed = write_model_keyword_path()
 def get_lora():
@@ -186,17 +223,16 @@ def get_lora():
     lora_paths = [Path(l) for l in glob.glob(LORA_PATH.joinpath("**/*").as_posix(), recursive=True)]
     # Get hashes
     valid_loras = [lf for lf in lora_paths if lf.suffix in {".safetensors", ".ckpt", ".pt"}]
-    hashes = {}
+    loras_with_hash = []
     for l in valid_loras:
         name = l.relative_to(LORA_PATH).as_posix()
         if model_keyword_installed:
-            hashes[name] = get_lora_simple_hash(l)
+            hash = get_lora_simple_hash(l)
         else:
-            hashes[name] = ""
+            hash = ""
+        loras_with_hash.append((l, name, hash))
     # Sort
-    sorted_loras = dict(sorted(hashes.items()))
-    # Add hashes and return
-    return [f"\"{name}\",{hash}" for name, hash in sorted_loras.items()]
+    return sort_models(loras_with_hash)
 
 
 def get_lyco():
@@ -204,22 +240,19 @@ def get_lyco():
 
     # Get a list of all LyCORIS in the folder
     lyco_paths = [Path(ly) for ly in glob.glob(LYCO_PATH.joinpath("**/*").as_posix(), recursive=True)]
-    
+
     # Get hashes
     valid_lycos = [lyf for lyf in lyco_paths if lyf.suffix in {".safetensors", ".ckpt", ".pt"}]
-    hashes = {}
+    lycos_with_hash = []
     for ly in valid_lycos:
         name = ly.relative_to(LYCO_PATH).as_posix()
         if model_keyword_installed:
-            hashes[name] = get_lora_simple_hash(ly)
+            hash = get_lora_simple_hash(ly)
         else:
-            hashes[name] = ""
-    
+            hash = ""
+        lycos_with_hash.append((ly, name, hash))
     # Sort
-    sorted_lycos = dict(sorted(hashes.items()))
-    # Add hashes and return
-    return [f"\"{name}\",{hash}" for name, hash in sorted_lycos.items()]
-
+    return sort_models(lycos_with_hash)
 
 def write_tag_base_path():
     """Writes the tag base path to a fixed location temporary file"""
@@ -318,7 +351,7 @@ def write_temp_files():
         lora = get_lora()
         if lora:
             write_to_temp_file('lora.txt', lora)
-            
+
     lyco_exists = LYCO_PATH is not None and LYCO_PATH.exists()
     if lyco_exists and not (lora_exists and LYCO_PATH.samefile(LORA_PATH)):
         lyco = get_lyco()
@@ -369,11 +402,13 @@ def on_ui_settings():
         "tac_useWildcards": shared.OptionInfo(True, "Search for wildcards"),
         "tac_sortWildcardResults": shared.OptionInfo(True, "Sort wildcard file contents alphabetically").info("If your wildcard files have a specific custom order, disable this to keep it"),
         "tac_useEmbeddings": shared.OptionInfo(True, "Search for embeddings"),
+        "tac_includeEmbeddingsInNormalResults": shared.OptionInfo(False, "Include embeddings in normal tag results").info("The 'JumpTo...' keybinds (End & Home key by default) will select the first non-embedding result of their direction on the first press for quick navigation in longer lists."),
         "tac_useHypernetworks": shared.OptionInfo(True, "Search for hypernetworks"),
         "tac_useLoras": shared.OptionInfo(True, "Search for Loras"),
         "tac_useLycos": shared.OptionInfo(True, "Search for LyCORIS/LoHa"),
         "tac_showWikiLinks": shared.OptionInfo(False, "Show '?' next to tags, linking to its Danbooru or e621 wiki page").info("Warning: This is an external site and very likely contains NSFW examples!"),
         "tac_showExtraNetworkPreviews": shared.OptionInfo(True, "Show preview thumbnails for extra networks if available"),
+        "tac_modelSortOrder": shared.OptionInfo("Name", "Model sort order", gr.Dropdown, lambda: {"choices": list(sort_criteria.keys())}).info("Order for extra network models and wildcards in dropdown"),
         # Insertion related settings
         "tac_replaceUnderscores": shared.OptionInfo(True, "Replace underscores with spaces on insertion"),
         "tac_escapeParentheses": shared.OptionInfo(True, "Escape parentheses on insertion"),
@@ -381,6 +416,7 @@ def on_ui_settings():
         "tac_appendSpace": shared.OptionInfo(True, "Append space on tag autocompletion").info("will append after comma if the above is enabled"),
         "tac_alwaysSpaceAtEnd": shared.OptionInfo(True, "Always append space if inserting at the end of the textbox").info("takes precedence over the regular space setting for that position"),
         "tac_modelKeywordCompletion": shared.OptionInfo("Never", "Try to add known trigger words for LORA/LyCO models", gr.Dropdown, lambda: {"choices": ["Never","Only user list","Always"]}).info("Will use & prefer the native activation keywords settable in the extra networks UI. Other functionality requires the <a href=\"https://github.com/mix1009/model-keyword\" target=\"_blank\">model-keyword</a> extension to be installed, but will work with it disabled.").needs_restart(),
+        "tac_modelKeywordLocation": shared.OptionInfo("Start of prompt", "Where to insert the trigger keyword", gr.Dropdown, lambda: {"choices": ["Start of prompt","End of prompt","Before LORA/LyCO"]}).info("Only relevant if the above option is enabled"),
         "tac_wildcardCompletionMode": shared.OptionInfo("To next folder level", "How to complete nested wildcard paths", gr.Dropdown, lambda: {"choices": ["To next folder level","To first difference","Always fully"]}).info("e.g. \"hair/colours/light/...\""),
         # Alias settings
         "tac_alias.searchByAlias": shared.OptionInfo(True, "Search by alias"),
@@ -451,25 +487,25 @@ def on_ui_settings():
         shared.opts.add_option("tac_colormap", shared.OptionInfo(colorDefault, colorLabel, gr.Textbox, section=TAC_SECTION))
 
     shared.opts.add_option("tac_refreshTempFiles", shared.OptionInfo("Refresh TAC temp files", "Refresh internal temp files", gr.HTML, {}, refresh=refresh_temp_files, section=TAC_SECTION))
-    
+
 script_callbacks.on_ui_settings(on_ui_settings)
 
 def api_tac(_: gr.Blocks, app: FastAPI):
     async def get_json_info(base_path: Path, filename: str = None):
         if base_path is None or (not base_path.exists()):
             return JSONResponse({}, status_code=404)
-        
+
         try:
             json_candidates = glob.glob(base_path.as_posix() + f"/**/{filename}.json", recursive=True)
             if json_candidates is not None and len(json_candidates) > 0:
                 return FileResponse(json_candidates[0])
         except Exception as e:
             return JSONResponse({"error": e}, status_code=500)
-        
+
     async def get_preview_thumbnail(base_path: Path, filename: str = None, blob: bool = False):
         if base_path is None or (not base_path.exists()):
             return JSONResponse({}, status_code=404)
-        
+
         try:
             img_glob = glob.glob(base_path.as_posix() + f"/**/{filename}.*", recursive=True)
             img_candidates = [img for img in img_glob if Path(img).suffix in [".png", ".jpg", ".jpeg", ".webp", ".gif"]]
@@ -481,14 +517,18 @@ def api_tac(_: gr.Blocks, app: FastAPI):
         except Exception as e:
             return JSONResponse({"error": e}, status_code=500)
 
+    @app.post("/tacapi/v1/refresh-temp-files")
+    async def api_refresh_temp_files():
+        refresh_temp_files()
+
     @app.get("/tacapi/v1/lora-info/{lora_name}")
     async def get_lora_info(lora_name):
         return await get_json_info(LORA_PATH, lora_name)
-    
+
     @app.get("/tacapi/v1/lyco-info/{lyco_name}")
     async def get_lyco_info(lyco_name):
         return await get_json_info(LYCO_PATH, lyco_name)
-    
+
     def get_path_for_type(type):
         if type == "lora":
             return LORA_PATH
@@ -504,11 +544,11 @@ def api_tac(_: gr.Blocks, app: FastAPI):
     @app.get("/tacapi/v1/thumb-preview/{filename}")
     async def get_thumb_preview(filename, type):
         return await get_preview_thumbnail(get_path_for_type(type), filename, False)
-    
+
     @app.get("/tacapi/v1/thumb-preview-blob/{filename}")
     async def get_thumb_preview_blob(filename, type):
         return await get_preview_thumbnail(get_path_for_type(type), filename, True)
-        
+
     @app.get("/tacapi/v1/wildcard-contents")
     async def get_wildcard_contents(basepath: str, filename: str):
         if basepath is None or basepath == "":
@@ -517,7 +557,7 @@ def api_tac(_: gr.Blocks, app: FastAPI):
         base = Path(basepath)
         if base is None or (not base.exists()):
             return JSONResponse({}, status_code=404)
-        
+
         try:
             wildcard_path = base.joinpath(filename)
             if wildcard_path.exists():

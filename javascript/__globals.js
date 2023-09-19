@@ -2,6 +2,7 @@
 var TAC_CFG = null;
 var tagBasePath = "";
 var modelKeywordPath = "";
+var tacSelfTrigger = false;
 
 // Tag completion data loaded from files
 var allTags = [];
@@ -36,6 +37,7 @@ let hideBlocked = false;
 // Tag selection for keyboard navigation
 var selectedTag = null;
 var oldSelectedTag = null;
+var resultCountBeforeNormalTags = 0;
 
 // Lora keyword undo/redo history
 var textBeforeKeywordInsertion = "";

@@ -211,11 +211,13 @@ async function syncOptions() {
         useWildcards: opts["tac_useWildcards"],
         sortWildcardResults: opts["tac_sortWildcardResults"],
         useEmbeddings: opts["tac_useEmbeddings"],
+        includeEmbeddingsInNormalResults: opts["tac_includeEmbeddingsInNormalResults"],
         useHypernetworks: opts["tac_useHypernetworks"],
         useLoras: opts["tac_useLoras"],
 	    useLycos: opts["tac_useLycos"],
         showWikiLinks: opts["tac_showWikiLinks"],
         showExtraNetworkPreviews: opts["tac_showExtraNetworkPreviews"],
+        modelSortOrder: opts["tac_modelSortOrder"],
         // Insertion related settings
         replaceUnderscores: opts["tac_replaceUnderscores"],
         escapeParentheses: opts["tac_escapeParentheses"],
@@ -224,6 +226,7 @@ async function syncOptions() {
         alwaysSpaceAtEnd: opts["tac_alwaysSpaceAtEnd"],
         wildcardCompletionMode: opts["tac_wildcardCompletionMode"],
         modelKeywordCompletion: opts["tac_modelKeywordCompletion"],
+        modelKeywordLocation: opts["tac_modelKeywordLocation"],
         // Alias settings
         alias: {
             searchByAlias: opts["tac_alias.searchByAlias"],
@@ -265,6 +268,17 @@ async function syncOptions() {
     if (!TAC_CFG || newCFG.tagFile !== TAC_CFG.tagFile || newCFG.extra.extraFile !== TAC_CFG.extra.extraFile) {
         allTags = [];
         await loadTags(newCFG);
+    }
+
+    // Refresh temp files if model sort order changed
+    // Contrary to the other loads, this one shouldn't happen on a first time load
+    if (TAC_CFG && newCFG.modelSortOrder !== TAC_CFG.modelSortOrder) {
+        const dropdown = gradioApp().querySelector("#setting_tac_modelSortOrder");
+        dropdown.style.opacity = 0.5;
+        dropdown.style.pointerEvents = "none";
+        await refreshTacTempFiles(true);
+        dropdown.style.opacity = null;
+        dropdown.style.pointerEvents = null;
     }
 
     // Update CSS if maxResults changed
@@ -330,7 +344,7 @@ function showResults(textArea) {
     if (TAC_CFG.slidingPopup) {
         let caretPosition = getCaretCoordinates(textArea, textArea.selectionEnd).left;
         let offset = Math.min(textArea.offsetLeft - textArea.scrollLeft + caretPosition, textArea.offsetWidth - parentDiv.offsetWidth);
-    
+
         parentDiv.style.left = `${offset}px`;
     } else {
         if (parentDiv.style.left)
@@ -346,9 +360,9 @@ function showResults(textArea) {
 function hideResults(textArea) {
     let textAreaId = getTextAreaIdentifier(textArea);
     let resultsDiv = gradioApp().querySelector('.autocompleteParent' + textAreaId);
-    
+
     if (!resultsDiv) return;
-    
+
     resultsDiv.style.display = "none";
     selectedTag = null;
 }
@@ -358,12 +372,12 @@ function isEnabled() {
     if (TAC_CFG.activeIn.global) {
         // Skip check if the current model was not correctly detected, since it could wrongly disable the script otherwise
         if (!currentModelName || !currentModelHash) return true;
-        
+
         let modelList = TAC_CFG.activeIn.modelList
             .split(",")
             .map(x => x.trim())
             .filter(x => x.length > 0);
-        
+
         let shortHash = currentModelHash.substring(0, 10);
         let modelNameWithoutHash = currentModelName.replace(/\[.*\]$/g, "").trim();
         if (TAC_CFG.activeIn.modelListMode.toLowerCase() === "blacklist") {
@@ -382,7 +396,7 @@ function isEnabled() {
 const WEIGHT_REGEX = /[([]([^()[\]:|]+)(?::(?:\d+(?:\.\d+)?|\.\d+))?[)\]]/g;
 const POINTY_REGEX = /<[^\s,<](?:[^\t\n\r,<>]*>|[^\t\n\r,> ]*)/g;
 const COMPLETED_WILDCARD_REGEX = /__[^\s,_][^\t\n\r,_]*[^\s,_]__[^\s,_]*/g;
-const NORMAL_TAG_REGEX = /[^\s,|<>)\]]+|</g;
+const NORMAL_TAG_REGEX = /[^\s,|<>\]:]+_\([^\s,|<>\]:]*\)?|[^\s,|<>():\]]+|</g;
 const RUBY_TAG_REGEX = /[\w\d<][\w\d' \-?!/$%]{2,}>?/g;
 const TAG_REGEX = new RegExp(`${POINTY_REGEX.source}|${COMPLETED_WILDCARD_REGEX.source}|${NORMAL_TAG_REGEX.source}`, "g");
 
@@ -493,7 +507,7 @@ async function insertTextAtCursor(textArea, result, tagword, tabCompletedWithout
                 keywords = info["activation text"];
             }
         }
-        
+
         if (!keywords && modelKeywordPath.length > 0 && result.hash && result.hash !== "NOFILE" && result.hash.length > 0) {
             let nameDict = modelKeywordDict.get(result.hash);
             let names = [result.text + ".safetensors", result.text + ".pt", result.text + ".ckpt"];
@@ -506,7 +520,7 @@ async function insertTextAtCursor(textArea, result, tagword, tabCompletedWithout
                         keywords = nameDict.get(name);
                     }
                 });
-                
+
                 if (!found)
                     keywords = nameDict.get("none");
             }
@@ -514,17 +528,25 @@ async function insertTextAtCursor(textArea, result, tagword, tabCompletedWithout
 
         if (keywords && keywords.length > 0) {
             textBeforeKeywordInsertion = newPrompt;
-            
-            newPrompt = `${keywords}, ${newPrompt}`; // Insert keywords
-            
+
+            if (TAC_CFG.modelKeywordLocation === "Start of prompt")
+                newPrompt = `${keywords}, ${newPrompt}`; // Insert keywords
+            else if (TAC_CFG.modelKeywordLocation === "End of prompt")
+                newPrompt = `${newPrompt}, ${keywords}`; // Insert keywords
+            else {
+                let keywordStart = prompt[editStart - 1] === " " ? editStart - 1 : editStart;
+                newPrompt = prompt.substring(0, keywordStart) + `, ${keywords} ${insert}` + prompt.substring(editEnd);
+            }
+
+
             textAfterKeywordInsertion = newPrompt;
             keywordInsertionUndone = false;
             setTimeout(() => lastEditWasKeywordInsertion = true, 200)
-            
+
             keywordsLength = keywords.length + 2; // +2 for the comma and space
         }
     }
-    
+
     // Insert into prompt textbox and reposition cursor
     textArea.value = newPrompt;
     textArea.selectionStart = afterInsertCursorPos + optionalSeparator.length + keywordsLength;
@@ -532,6 +554,7 @@ async function insertTextAtCursor(textArea, result, tagword, tabCompletedWithout
 
     // Since we've modified a Gradio Textbox component manually, we need to simulate an `input` DOM event to ensure it's propagated back to python.
     // Uses a built-in method from the webui's ui.js which also already accounts for event target
+    tacSelfTrigger = true;
     updateInput(textArea);
 
     // Update previous tags with the edited prompt to prevent re-searching the same term
@@ -656,7 +679,7 @@ function addResultsToList(textArea, results, tagword, resetList) {
             if (linkPart.includes("[")) {
                 linkPart = linkPart.split("[")[0]
             }
-            
+
             // Set link based on selected file
             let tagFileNameLower = tagFileName.toLowerCase();
             if (tagFileNameLower.startsWith("danbooru")) {
@@ -664,7 +687,7 @@ function addResultsToList(textArea, results, tagword, resetList) {
             } else if (tagFileNameLower.startsWith("e621")) {
                 wikiLink.href = `https://e621.net/wiki_pages/${linkPart}`;
             }
-            
+
             wikiLink.target = "_blank";
             flexDiv.appendChild(wikiLink);
         }
@@ -717,7 +740,7 @@ function addResultsToList(textArea, results, tagword, resetList) {
                 else if (result.meta.startsWith("v2"))
                     itemText.classList.add("acEmbeddingV2");
             }
-                
+
             flexDiv.appendChild(metaDiv);
         }
 
@@ -782,7 +805,7 @@ async function updateSelectionStyle(textArea, newIndex, oldIndex) {
             }
 
             let img = previewDiv.querySelector("img");
-            
+
             let url = await getExtraNetworkPreviewURL(selectedFilename, shorthandType);
             if (url) {
                 img.src = url;
@@ -808,7 +831,7 @@ function updateRuby(textArea, prompt) {
         ruby.setAttribute("class", `acRuby${typeClass} notranslate`);
         textArea.parentNode.appendChild(ruby);
     }
-    
+
     ruby.innerText = prompt;
 
     let bracketEscapedPrompt = prompt.replaceAll("\\(", "$").replaceAll("\\)", "%");
@@ -826,9 +849,9 @@ function updateRuby(textArea, prompt) {
             .replaceAll(" ", "_")
             .replaceAll("\\(", "(")
             .replaceAll("\\)", ")");
-        
+
         const translation = translations?.get(tag) || translations?.get(unsanitizedTag); 
-        
+
         let escapedTag = escapeRegExp(tag);
         return { tag, escapedTag, translation };
     }
@@ -844,14 +867,14 @@ function updateRuby(textArea, prompt) {
     // First try to find direct matches
     [...rubyTags].forEach(tag => {
         let tuple = prepareTag(tag);
-        
+
         if (tuple.translation) {
             html = replaceOccurences(html, tuple);
         } else {
             let subTags = tuple.tag.split(" ").filter(x => x.trim().length > 0);
             // Return if there is only one word
             if (subTags.length === 1) return;
-            
+
             let subHtml = tag.replaceAll("$", "\\(").replaceAll("%", "\\)");
 
             let translateNgram = (windows) => {
@@ -866,14 +889,14 @@ function updateRuby(textArea, prompt) {
                     }
                 });
             }
-    
+
             // Perform n-gram sliding window search
             translateNgram(toNgrams(subTags, 3));
             translateNgram(toNgrams(subTags, 2));
             translateNgram(toNgrams(subTags, 1));
 
             let escapedTag = escapeRegExp(tuple.tag);
-            
+
             let searchRegex = new RegExp(`(?<!<ruby>)(?:\\b)${escapedTag}(?:\\b|$|(?=[,|: \\t\\n\\r]))(?!<rt>)`, "g");
             html = html.replaceAll(searchRegex, subHtml);
         }
@@ -910,6 +933,7 @@ function checkKeywordInsertionUndo(textArea, event) {
             if (lastEditWasKeywordInsertion && !keywordInsertionUndone) {
                 keywordInsertionUndone = true;
                 textArea.value = textBeforeKeywordInsertion;
+                tacSelfTrigger = true;
                 updateInput(textArea);
             }
             break;
@@ -917,6 +941,7 @@ function checkKeywordInsertionUndo(textArea, event) {
             if (lastEditWasKeywordInsertion && keywordInsertionUndone) {
                 keywordInsertionUndone = false;
                 textArea.value = textAfterKeywordInsertion;
+                tacSelfTrigger = true;
                 updateInput(textArea);
             }
         case undefined:
@@ -985,46 +1010,46 @@ async function autocomplete(textArea, prompt, fixedTag = null) {
     }
 
     results = [];
+    resultCountBeforeNormalTags = 0;
     tagword = tagword.toLowerCase().replace(/[\n\r]/g, "");
 
     // Process all parsers
-    let resultCandidates = await processParsers(textArea, prompt);
+    let resultCandidates = (await processParsers(textArea, prompt))?.filter(x => x.length > 0);
     // If one ore more result candidates match, use their results
     if (resultCandidates && resultCandidates.length > 0) {
         // Flatten our candidate(s)
         results = resultCandidates.flat();
-        // If there was more than one candidate, sort the results by text to mix them
-        // instead of having them added in the order of the parsers
-        let shouldSort = resultCandidates.length > 1;
-        if (shouldSort) {
-            results = results.sort((a, b) => {
-                let sortByA = a.type === ResultType.chant ? a.aliases : a.text;
-                let sortByB = b.type === ResultType.chant ? b.aliases : b.text;
-                return sortByA.localeCompare(sortByB);
-            });
+        // Sort results, but not if it's umi tags since they are sorted by count
+        if (!(resultCandidates.length === 1 && results[0].type === ResultType.umiWildcard))
+            results = results.sort(getSortFunction());
 
-            // Since some tags are kaomoji, we have to add the normal results in some cases
-            if (tagword.startsWith("<") || tagword.startsWith("*<")) {
-                // Create escaped search regex with support for * as a start placeholder
-                let searchRegex;
-                if (tagword.startsWith("*")) {
-                    tagword = tagword.slice(1);
-                    searchRegex = new RegExp(`${escapeRegExp(tagword)}`, 'i');
-                } else {
-                    searchRegex = new RegExp(`(^|[^a-zA-Z])${escapeRegExp(tagword)}`, 'i');
-                }
-                let genericResults = allTags.filter(x => x[0].toLowerCase().search(searchRegex) > -1).slice(0, TAC_CFG.maxResults);
-
-                genericResults.forEach(g => {
-                    let result = new AutocompleteResult(g[0].trim(), ResultType.tag)
-                    result.category = g[1];
-                    result.count = g[2];
-                    result.aliases = g[3];
-                    results.push(result);
-                });
+        // Since some tags are kaomoji, we have to add the normal results in some cases
+        if (tagword.startsWith("<") || tagword.startsWith("*<")) {
+            // Create escaped search regex with support for * as a start placeholder
+            let searchRegex;
+            if (tagword.startsWith("*")) {
+                tagword = tagword.slice(1);
+                searchRegex = new RegExp(`${escapeRegExp(tagword)}`, 'i');
+            } else {
+                searchRegex = new RegExp(`(^|[^a-zA-Z])${escapeRegExp(tagword)}`, 'i');
             }
+            let genericResults = allTags.filter(x => x[0].toLowerCase().search(searchRegex) > -1).slice(0, TAC_CFG.maxResults);
+
+            genericResults.forEach(g => {
+                let result = new AutocompleteResult(g[0].trim(), ResultType.tag)
+                result.category = g[1];
+                result.count = g[2];
+                result.aliases = g[3];
+                results.push(result);
+            });
         }
-    } else { // Else search the normal tag list
+    }
+    // Else search the normal tag list
+    if (!resultCandidates || resultCandidates.length === 0
+        || (TAC_CFG.includeEmbeddingsInNormalResults && !(tagword.startsWith("<") || tagword.startsWith("*<")))
+    ) {
+        resultCountBeforeNormalTags = results.length;
+
         // Create escaped search regex with support for * as a start placeholder
         let searchRegex;
         if (tagword.startsWith("*")) {
@@ -1039,7 +1064,7 @@ async function autocomplete(textArea, prompt, fixedTag = null) {
         let aliasFilter = (x) => x[3] && x[3].toLowerCase().search(searchRegex) > -1;
         let translationFilter = (x) => (translations.has(x[0]) && translations.get(x[0]).toLowerCase().search(searchRegex) > -1)
             || x[3] && x[3].split(",").some(y => translations.has(y) && translations.get(y).toLowerCase().search(searchRegex) > -1);
-        
+
         let fil;
         if (TAC_CFG.alias.searchByAlias && TAC_CFG.translation.searchByTranslation)
             fil = (x) => baseFilter(x) || aliasFilter(x) || translationFilter(x);
@@ -1077,10 +1102,10 @@ async function autocomplete(textArea, prompt, fixedTag = null) {
                 results = results.concat(extraResults);
             }
         }
-        
+
         // Slice if the user has set a max result count
         if (!TAC_CFG.showAllResults) {
-            results = results.slice(0, TAC_CFG.maxResults);
+            results = results.slice(0, TAC_CFG.maxResults + resultCountBeforeNormalTags);
         }
     }
 
@@ -1098,7 +1123,7 @@ async function autocomplete(textArea, prompt, fixedTag = null) {
 function navigateInList(textArea, event) {
     // Return if the function is deactivated in the UI or the current model is excluded due to white/blacklist settings
     if (!isEnabled()) return;
-    
+
     let keys = TAC_CFG.keymap;
 
     // Close window if Home or End is pressed while not a keybinding, since it would break completion on leaving the original tag
@@ -1148,10 +1173,25 @@ function navigateInList(textArea, event) {
             }
             break;
         case keys["JumpToStart"]:
-            selectedTag = 0;
+            if (TAC_CFG.includeEmbeddingsInNormalResults &&
+                selectedTag > resultCountBeforeNormalTags &&
+                resultCountBeforeNormalTags > 0
+            ) {
+                selectedTag = resultCountBeforeNormalTags;
+            } else {
+                selectedTag = 0;
+            }
             break;
         case keys["JumpToEnd"]:
-            selectedTag = resultCount - 1;
+            // Jump to the end of the list, or the end of embeddings if they are included in the normal results
+            if (TAC_CFG.includeEmbeddingsInNormalResults &&
+                selectedTag < resultCountBeforeNormalTags &&
+                resultCountBeforeNormalTags > 0
+            ) {
+                selectedTag = Math.min(resultCountBeforeNormalTags, resultCount - 1);
+            } else {
+                selectedTag = resultCount - 1;
+            }
             break;
         case keys["ChooseSelected"]:
             if (selectedTag !== null) {
@@ -1188,8 +1228,8 @@ function navigateInList(textArea, event) {
     event.stopPropagation();
 }
 
-async function refreshTacTempFiles() {
-    setTimeout(async () => {
+async function refreshTacTempFiles(api = false) {
+    const reload = async () => {
         wildcardFiles = [];
         wildcardExtFiles = [];
         umiWildcards = [];
@@ -1201,7 +1241,16 @@ async function refreshTacTempFiles() {
         await processQueue(QUEUE_FILE_LOAD, null);
 
         console.log("TAC: Refreshed temp files");
-    }, 2000);
+    }
+    
+    if (api) {
+        await postAPI("tacapi/v1/refresh-temp-files", null);
+        await reload();
+    } else {
+        setTimeout(async () => {
+            await reload();
+        }, 2000);
+    }
 }
 
 function addAutocompleteToArea(area) {
@@ -1224,8 +1273,13 @@ function addAutocompleteToArea(area) {
 
         // Add autocomplete event listener
         area.addEventListener('input', (e) => {
-            debounce(autocomplete(area, area.value), TAC_CFG.delayTime);
             updateRuby(area, area.value);
+
+            // Cancel autocomplete itself if the event has no inputType (e.g. because it was triggered by the updateInput() function)
+            if (!e.inputType && !tacSelfTrigger) return;
+            tacSelfTrigger = false;
+
+            debounce(autocomplete(area, area.value), TAC_CFG.delayTime);
             checkKeywordInsertionUndo(area, e);
         });
         // Add focusout event listener
@@ -1286,6 +1340,13 @@ async function setup() {
     // Listener for internal temp files refresh button
     gradioApp().querySelector("#refresh_tac_refreshTempFiles")?.addEventListener("click", refreshTacTempFiles);
 
+    // Also add listener for external network refresh button (plus triggering python code)
+    ["#img2img_extra_refresh", "#txt2img_extra_refresh"].forEach(e => {
+        gradioApp().querySelector(e)?.addEventListener("click", ()=>{
+            refreshTacTempFiles(true);
+        });
+    })
+
     // Add mutation observer for the model hash text to also allow hash-based blacklist again
     let modelHashText = gradioApp().querySelector("#sd_checkpoint_hash");
     updateModelName();
@@ -1320,7 +1381,7 @@ async function setup() {
     let mode = (document.querySelector(".dark") || gradioApp().querySelector(".dark")) ? 0 : 1;
     // Check if we are on webkit
     let browser = navigator.userAgent.toLowerCase().indexOf('firefox') > -1 ? "firefox" : "other";
-    
+
     let css = autocompleteCSS;
     // Replace vars with actual values (can't use actual css vars because of the way we inject the css)
     Object.keys(styleColors).forEach((key) => {
@@ -1329,7 +1390,7 @@ async function setup() {
     Object.keys(browserVars).forEach((key) => {
         css = css.replaceAll(`var(${key})`, browserVars[key][browser]);
     })
-    
+
     if (acStyle.styleSheet) {
         acStyle.styleSheet.cssText = css;
     } else {
