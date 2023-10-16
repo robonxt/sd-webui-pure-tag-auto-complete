@@ -489,6 +489,10 @@ async function insertTextAtCursor(textArea, result, tagword, tabCompletedWithout
         optionalSeparator = TAC_CFG.extraNetworksSeparator || " ";
     }
 
+    // Escape $ signs since they are special chars for the replace function
+    // We need four since we're also escaping them in replaceAll in the first place
+    sanitizedText = sanitizedText.replaceAll("$", "$$$$");
+
     // Replace partial tag word with new text, add comma if needed
     let insert = surrounding.replace(match, sanitizedText + optionalSeparator);
 
@@ -511,6 +515,14 @@ async function insertTextAtCursor(textArea, result, tagword, tabCompletedWithout
         if (!keywords && modelKeywordPath.length > 0 && result.hash && result.hash !== "NOFILE" && result.hash.length > 0) {
             let nameDict = modelKeywordDict.get(result.hash);
             let names = [result.text + ".safetensors", result.text + ".pt", result.text + ".ckpt"];
+
+            // No match, try to find a sha256 match from the cache file
+            if (!nameDict) {
+                const sha256 = await fetchAPI(`/tacapi/v1/lora-cached-hash/${result.text}`)
+                if (sha256) {
+                    nameDict = modelKeywordDict.get(sha256);
+                }
+            }
 
             if (nameDict) {
                 let found = false;
@@ -679,6 +691,8 @@ function addResultsToList(textArea, results, tagword, resetList) {
             if (linkPart.includes("[")) {
                 linkPart = linkPart.split("[")[0]
             }
+
+            linkPart = encodeURIComponent(linkPart);
 
             // Set link based on selected file
             let tagFileNameLower = tagFileName.toLowerCase();
