@@ -1,4 +1,5 @@
 ﻿const styleColors = {
+    "--results-neutral-text": ["#e0e0e0","black"],
     "--results-bg": ["#0b0f19", "#ffffff"],
     "--results-border-color": ["#4b5563", "#e5e7eb"],
     "--results-border-width": ["1px", "1.5px"],
@@ -35,6 +36,7 @@ const autocompleteCSS = `
     .autocompleteResults {
         background-color: var(--results-bg) !important;
         border: var(--results-border-width) solid var(--results-border-color) !important;
+        color: var(--results-neutral-text) !important;
         border-radius: 12px !important;
         height: fit-content;
         flex-basis: fit-content;
@@ -1267,6 +1269,13 @@ async function refreshTacTempFiles(api = false) {
     }
 }
 
+async function refreshEmbeddings() {
+    await postAPI("tacapi/v1/refresh-embeddings", null);
+    embeddings = [];
+    await processQueue(QUEUE_FILE_LOAD, null);
+    console.log("TAC: Refreshed embeddings");
+}
+
 function addAutocompleteToArea(area) {
     // Return if autocomplete is disabled for the current area type in config
     let textAreaId = getTextAreaIdentifier(area);
@@ -1371,6 +1380,7 @@ async function setup() {
                 if (mutation.type === "attributes" && mutation.attributeName === "title") {
                     currentModelHash = mutation.target.title;
                     updateModelName();
+                    refreshEmbeddings();
                 }
             }
         });

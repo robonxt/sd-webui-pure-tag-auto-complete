@@ -202,14 +202,79 @@ def get_hypernetworks():
     return sort_models(all_hypernetworks)
 
 model_keyword_installed = write_model_keyword_path()
+
+
+def _get_lora():
+    """
+    Write a list of all lora.
+    Fallback method for when the built-in Lora.networks module is not available.
+    """
+    # Get a list of all lora in the folder
+    lora_paths = [
+        Path(l)
+        for l in glob.glob(LORA_PATH.joinpath("**/*").as_posix(), recursive=True)
+    ]
+    # Get hashes
+    valid_loras = [
+        lf
+        for lf in lora_paths
+        if lf.suffix in {".safetensors", ".ckpt", ".pt"} and lf.is_file()
+    ]
+
+    return valid_loras
+
+
+def _get_lyco():
+    """
+    Write a list of all LyCORIS/LOHA from https://github.com/KohakuBlueleaf/a1111-sd-webui-lycoris
+    Fallback method for when the built-in Lora.networks module is not available.
+    """
+    # Get a list of all LyCORIS in the folder
+    lyco_paths = [
+        Path(ly)
+        for ly in glob.glob(LYCO_PATH.joinpath("**/*").as_posix(), recursive=True)
+    ]
+
+    # Get hashes
+    valid_lycos = [
+        lyf
+        for lyf in lyco_paths
+        if lyf.suffix in {".safetensors", ".ckpt", ".pt"} and lyf.is_file()
+    ]
+    return valid_lycos
+
+
+# Attempt to use the build-in Lora.networks Lora/LyCORIS models lists.
+try:
+    import sys
+    from modules import extensions
+    sys.path.append(Path(extensions.extensions_builtin_dir).joinpath("Lora").as_posix())
+    import lora # pyright: ignore [reportMissingImports]
+
+    def _get_lora():
+        return [
+            Path(model.filename).absolute()
+            for model in lora.available_loras.values()
+            if Path(model.filename).absolute().is_relative_to(LORA_PATH)
+        ]
+
+    def _get_lyco():
+        return [
+            Path(model.filename).absolute()
+            for model in lora.available_loras.values()
+            if Path(model.filename).absolute().is_relative_to(LYCO_PATH)
+        ]
+
+except Exception as e:
+    pass
+    # no need to report
+    # print(f'Exception setting-up performant fetchers: {e}')
+
+
 def get_lora():
     """Write a list of all lora"""
-    global model_keyword_installed
-
-    # Get a list of all lora in the folder
-    lora_paths = [Path(l) for l in glob.glob(LORA_PATH.joinpath("**/*").as_posix(), recursive=True)]
     # Get hashes
-    valid_loras = [lf for lf in lora_paths if lf.suffix in {".safetensors", ".ckpt", ".pt"} and lf.is_file()]
+    valid_loras = _get_lora()
     loras_with_hash = []
     for l in valid_loras:
         name = l.relative_to(LORA_PATH).as_posix()
@@ -224,12 +289,8 @@ def get_lora():
 
 def get_lyco():
     """Write a list of all LyCORIS/LOHA from https://github.com/KohakuBlueleaf/a1111-sd-webui-lycoris"""
-
-    # Get a list of all LyCORIS in the folder
-    lyco_paths = [Path(ly) for ly in glob.glob(LYCO_PATH.joinpath("**/*").as_posix(), recursive=True)]
-
     # Get hashes
-    valid_lycos = [lyf for lyf in lyco_paths if lyf.suffix in {".safetensors", ".ckpt", ".pt"} and lyf.is_file()]
+    valid_lycos = _get_lyco()
     lycos_with_hash = []
     for ly in valid_lycos:
         name = ly.relative_to(LYCO_PATH).as_posix()
@@ -240,6 +301,7 @@ def get_lyco():
         lycos_with_hash.append((ly, name, hash))
     # Sort
     return sort_models(lycos_with_hash)
+
 
 def write_tag_base_path():
     """Writes the tag base path to a fixed location temporary file"""
@@ -303,12 +365,24 @@ if EMB_PATH.exists():
     # Get embeddings after the model loaded callback
     script_callbacks.on_model_loaded(get_embeddings)
 
+def refresh_embeddings(force: bool, *args, **kwargs):
+    try:
+        # Fix for SD.Next infinite refresh loop due to gradio not updating after model load on demand.
+        # This will just skip embedding loading if no model is loaded yet (or there really are no embeddings).
+        # Try catch is just for safety incase sd_hijack access fails for some reason.
+        loaded = sd_hijack.model_hijack.embedding_db.word_embeddings
+        skipped = sd_hijack.model_hijack.embedding_db.skipped_embeddings
+        if len((loaded | skipped)) > 0:
+            load_textual_inversion_embeddings(force_reload=force)
+            get_embeddings(None)
+    except Exception:
+        pass
+
 def refresh_temp_files(*args, **kwargs):
     global WILDCARD_EXT_PATHS
     WILDCARD_EXT_PATHS = find_ext_wildcard_paths()
-    load_textual_inversion_embeddings(force_reload = True) # Instant embedding reload.
     write_temp_files()
-    get_embeddings(shared.sd_model)
+    refresh_embeddings(force=True)
 
 def write_temp_files():
     # Write wildcards to wc.txt if found
@@ -507,6 +581,10 @@ def api_tac(_: gr.Blocks, app: FastAPI):
     @app.post("/tacapi/v1/refresh-temp-files")
     async def api_refresh_temp_files():
         refresh_temp_files()
+
+    @app.post("/tacapi/v1/refresh-embeddings")
+    async def api_refresh_embeddings():
+        refresh_embeddings(force=False)
 
     @app.get("/tacapi/v1/lora-info/{lora_name}")
     async def get_lora_info(lora_name):
