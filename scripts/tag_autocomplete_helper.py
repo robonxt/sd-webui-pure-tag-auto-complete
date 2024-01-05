@@ -69,12 +69,13 @@ def get_wildcards():
 def get_ext_wildcards():
     """Returns a list of all extension wildcards. Works on nested folders."""
     wildcard_files = []
-
+    excluded_folder_names = [s.strip() for s in getattr(shared.opts, "tac_wildcardExclusionList", "").split(",")]
     for path in WILDCARD_EXT_PATHS:
         wildcard_files.append(path.as_posix())
         resolved = [(w, w.relative_to(path).as_posix())
                     for w in path.rglob("*.txt")
                     if w.name != "put wildcards here.txt"
+                    and not any(excluded in w.parts for excluded in excluded_folder_names)
                     and w.is_file()]
         wildcard_files.extend(sort_models(resolved, name_has_subpath=True))
         wildcard_files.append("-----")
@@ -277,6 +278,8 @@ def get_lora():
     valid_loras = _get_lora()
     loras_with_hash = []
     for l in valid_loras:
+        if not l.exists() or not l.is_file():
+            continue
         name = l.relative_to(LORA_PATH).as_posix()
         if model_keyword_installed:
             hash = get_lora_simple_hash(l)
@@ -293,6 +296,8 @@ def get_lyco():
     valid_lycos = _get_lyco()
     lycos_with_hash = []
     for ly in valid_lycos:
+        if not ly.exists() or not ly.is_file():
+            continue
         name = ly.relative_to(LYCO_PATH).as_posix()
         if model_keyword_installed:
             hash = get_lora_simple_hash(ly)
@@ -380,19 +385,21 @@ def refresh_embeddings(force: bool, *args, **kwargs):
 
 def refresh_temp_files(*args, **kwargs):
     global WILDCARD_EXT_PATHS
-    WILDCARD_EXT_PATHS = find_ext_wildcard_paths()
-    write_temp_files()
+    skip_wildcard_refresh = getattr(shared.opts, "tac_skipWildcardRefresh", False)
+    if skip_wildcard_refresh:
+        WILDCARD_EXT_PATHS = find_ext_wildcard_paths()
+    write_temp_files(skip_wildcard_refresh)
     refresh_embeddings(force=True)
 
-def write_temp_files():
+def write_temp_files(skip_wildcard_refresh = False):
     # Write wildcards to wc.txt if found
-    if WILDCARD_PATH.exists():
+    if WILDCARD_PATH.exists() and not skip_wildcard_refresh:
         wildcards = [WILDCARD_PATH.relative_to(FILE_DIR).as_posix()] + get_wildcards()
         if wildcards:
             write_to_temp_file('wc.txt', wildcards)
 
     # Write extension wildcards to wce.txt if found
-    if WILDCARD_EXT_PATHS is not None:
+    if WILDCARD_EXT_PATHS is not None and not skip_wildcard_refresh:
         wildcards_ext = get_ext_wildcards()
         if wildcards_ext:
             write_to_temp_file('wce.txt', wildcards_ext)
@@ -462,11 +469,14 @@ def on_ui_settings():
         "tac_delayTime": shared.OptionInfo(100, "Time in ms to wait before triggering completion again").needs_restart(),
         "tac_useWildcards": shared.OptionInfo(True, "Search for wildcards"),
         "tac_sortWildcardResults": shared.OptionInfo(True, "Sort wildcard file contents alphabetically").info("If your wildcard files have a specific custom order, disable this to keep it"),
+        "tac_wildcardExclusionList": shared.OptionInfo("", "Wildcard folder exclusion list").info("Add folder names that shouldn't be searched for wildcards, separated by comma.").needs_restart(),
+        "tac_skipWildcardRefresh": shared.OptionInfo(False, "Don't re-scan for wildcard files when pressing the extra networks refresh button").info("Useful to prevent hanging if you use a very large wildcard collection."),
         "tac_useEmbeddings": shared.OptionInfo(True, "Search for embeddings"),
         "tac_includeEmbeddingsInNormalResults": shared.OptionInfo(False, "Include embeddings in normal tag results").info("The 'JumpTo...' keybinds (End & Home key by default) will select the first non-embedding result of their direction on the first press for quick navigation in longer lists."),
         "tac_useHypernetworks": shared.OptionInfo(True, "Search for hypernetworks"),
         "tac_useLoras": shared.OptionInfo(True, "Search for Loras"),
         "tac_useLycos": shared.OptionInfo(True, "Search for LyCORIS/LoHa"),
+        "tac_useLoraPrefixForLycos": shared.OptionInfo(True, "Use the '<lora:' prefix instead of '<lyco:' for models in the LyCORIS folder").info("The lyco prefix is included for backwards compatibility and not used anymore by default. Disable this if you are on an old webui version without built-in lyco support."),
         "tac_showWikiLinks": shared.OptionInfo(False, "Show '?' next to tags, linking to its Danbooru or e621 wiki page").info("Warning: This is an external site and very likely contains NSFW examples!"),
         "tac_showExtraNetworkPreviews": shared.OptionInfo(True, "Show preview thumbnails for extra networks if available"),
         "tac_modelSortOrder": shared.OptionInfo("Name", "Model sort order", gr.Dropdown, lambda: {"choices": list(sort_criteria.keys())}).info("Order for extra network models and wildcards in dropdown"),
