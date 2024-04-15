@@ -12,7 +12,8 @@ const ResultType = Object.freeze({
     "hypernetwork": 8,
     "lora": 9,
     "lyco": 10,
-    "chant": 11
+    "chant": 11,
+    "styleName": 12
 });
 
 // Class to hold result data and annotations to make it clearer to use
@@ -23,7 +24,8 @@ class AutocompleteResult {
 
     // Additional info, only used in some cases
     category = null;
-    count = null;
+    count = Number.MAX_SAFE_INTEGER;
+    usageBias = null;
     aliases = null;
     meta = null;
     hash = null;

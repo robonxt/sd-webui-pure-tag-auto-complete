@@ -7,7 +7,10 @@ class LoraParser extends BaseTagParser {
         let tempResults = [];
         if (tagword !== "<" && tagword !== "<l:" && tagword !== "<lora:") {
             let searchTerm = tagword.replace("<lora:", "").replace("<l:", "").replace("<", "");
-            let filterCondition = x => x.toLowerCase().includes(searchTerm) || x.toLowerCase().replaceAll(" ", "_").includes(searchTerm);
+            let filterCondition = x => {
+                let regex = new RegExp(escapeRegExp(searchTerm, true), 'i');
+                return regex.test(x.toLowerCase()) || regex.test(x.toLowerCase().replaceAll(" ", "_"));
+            };
             tempResults = loras.filter(x => filterCondition(x[0])); // Filter by tagword
         } else {
             tempResults = loras;
@@ -47,7 +50,7 @@ async function load() {
 async function sanitize(tagType, text) {
     if (tagType === ResultType.lora) {
         let multiplier = TAC_CFG.extraNetworksDefaultMultiplier;
-        let info = await fetchAPI(`tacapi/v1/lora-info/${text}`)
+        let info = await fetchTacAPI(`tacapi/v1/lora-info/${text}`)
         if (info && info["preferred weight"]) {
             multiplier = info["preferred weight"];
         }

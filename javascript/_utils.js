@@ -61,7 +61,7 @@ async function loadCSV(path) {
 }
 
 // Fetch API
-async function fetchAPI(url, json = true, cache = false) {
+async function fetchTacAPI(url, json = true, cache = false) {
     if (!cache) {
         const appendChar = url.includes("?") ? "&" : "?";
         url += `${appendChar}${new Date().getTime()}`
@@ -80,8 +80,12 @@ async function fetchAPI(url, json = true, cache = false) {
         return await response.text();
 }
 
-async function postAPI(url, body) {
-    let response = await fetch(url, { method: "POST", body: body });
+async function postTacAPI(url, body = null) {
+    let response = await fetch(url, {
+        method: "POST",
+        headers: {'Content-Type': 'application/json'},
+        body: body
+    });
 
     if (response.status != 200) {
         console.error(`Error posting to API endpoint "${url}": ` + response.status, response.statusText);
@@ -91,9 +95,20 @@ async function postAPI(url, body) {
     return await response.json();
 }
 
+async function putTacAPI(url, body = null) {
+    let response = await fetch(url, { method: "PUT", body: body });
+    
+    if (response.status != 200) {
+        console.error(`Error putting to API endpoint "${url}": ` + response.status, response.statusText);
+        return null;
+    }
+
+    return await response.json();
+}
+
 // Extra network preview thumbnails
-async function getExtraNetworkPreviewURL(filename, type) {
-    const previewJSON = await fetchAPI(`tacapi/v1/thumb-preview/${filename}?type=${type}`, true, true);
+async function getTacExtraNetworkPreviewURL(filename, type) {
+    const previewJSON = await fetchTacAPI(`tacapi/v1/thumb-preview/${filename}?type=${type}`, true, true);
     if (previewJSON?.url) {
         const properURL = `sd_extra_networks/thumb?filename=${previewJSON.url}`;
         if ((await fetch(properURL)).status == 200) {
@@ -105,6 +120,29 @@ async function getExtraNetworkPreviewURL(filename, type) {
         }
     } else {
         return null;
+    }
+}
+
+lastStyleRefresh = 0;
+// Refresh style file if needed
+async function refreshStyleNamesIfChanged() {
+    // Only refresh once per second
+    currentTimestamp = new Date().getTime();
+    if (currentTimestamp - lastStyleRefresh < 1000) return;
+    lastStyleRefresh = currentTimestamp;
+
+    const response = await fetch(`tacapi/v1/refresh-styles-if-changed?${new Date().getTime()}`)
+    if (response.status === 304) {
+        // Not modified
+    } else if (response.status === 200) {
+        // Reload
+        QUEUE_FILE_LOAD.forEach(async fn => {
+            if (fn.toString().includes("styleNames"))
+                await fn.call(null, true);
+        })
+    } else {
+        // Error
+        console.error(`Error refreshing styles.txt: ` + response.status, response.statusText);
     }
 }
 
@@ -157,6 +195,114 @@ function flatten(obj, roots = [], sep = ".") {
   );
 }
 
+// Calculate biased tag score based on post count and frequent usage
+function calculateUsageBias(result, count, uses) {
+    // Check setting conditions
+    if (uses < TAC_CFG.frequencyMinCount) {
+        uses = 0;
+    } else if (uses != 0) {
+        result.usageBias = true;
+    }
+
+    switch (TAC_CFG.frequencyFunction) {
+        case "Logarithmic (weak)":
+            return Math.log(1 + count) + Math.log(1 + uses);
+        case "Logarithmic (strong)":
+            return Math.log(1 + count) + 2 * Math.log(1 + uses);
+        case "Usage first":
+            return uses;
+        default:
+            return count;
+    }
+}
+// Beautify return type for easier parsing
+function mapUseCountArray(useCounts, posAndNeg = false) {
+    return useCounts.map(useCount => {
+        if (posAndNeg) {
+            return {
+                "name": useCount[0],
+                "type": useCount[1],
+                "count": useCount[2],
+                "negCount": useCount[3],
+                "lastUseDate": useCount[4]
+            }
+        }
+        return {
+            "name": useCount[0],
+            "type": useCount[1],
+            "count": useCount[2],
+            "lastUseDate": useCount[3]
+        }
+    });
+}
+// Call API endpoint to increase bias of tag in the database
+function increaseUseCount(tagName, type, negative = false) {
+    postTacAPI(`tacapi/v1/increase-use-count?tagname=${tagName}&ttype=${type}&neg=${negative}`);
+}
+// Get use count of tag from the database
+async function getUseCount(tagName, type, negative = false) {
+    const response = await fetchTacAPI(`tacapi/v1/get-use-count?tagname=${tagName}&ttype=${type}&neg=${negative}`, true, false);
+    // Guard for no db
+    if (response == null) return null;
+    // Result
+    return response["result"];
+}
+async function getUseCounts(tagNames, types, negative = false) {
+    // While semantically weird, we have to use POST here for the body, as urls are limited in length
+    const body = JSON.stringify({"tagNames": tagNames, "tagTypes": types, "neg": negative});
+    const response = await postTacAPI(`tacapi/v1/get-use-count-list`, body)
+    // Guard for no db
+    if (response == null) return null;
+    // Results
+    return mapUseCountArray(response["result"]);
+}
+async function getAllUseCounts() {
+    const response = await fetchTacAPI(`tacapi/v1/get-all-use-counts`);
+    // Guard for no db
+    if (response == null) return null;
+    // Results
+    return mapUseCountArray(response["result"], true);
+}
+async function resetUseCount(tagName, type, resetPosCount, resetNegCount) {
+    await putTacAPI(`tacapi/v1/reset-use-count?tagname=${tagName}&ttype=${type}&pos=${resetPosCount}&neg=${resetNegCount}`);
+}
+
+function createTagUsageTable(tagCounts) {
+    // Create table
+    let tagTable = document.createElement("table");
+    tagTable.innerHTML =
+    `<thead>
+        <tr>
+            <td>Name</td>
+            <td>Type</td>
+            <td>Count(+)</td>
+            <td>Count(-)</td>
+            <td>Last used</td>
+        </tr>
+    </thead>`;
+    tagTable.id = "tac_tagUsageTable"
+
+    tagCounts.forEach(t => {
+        let tr = document.createElement("tr");
+        
+        // Fill values
+        let values = [t.name, t.type-1, t.count, t.negCount, t.lastUseDate]
+        values.forEach(v => {
+            let td = document.createElement("td");
+            td.innerText = v;
+            tr.append(td);
+        });
+        // Add delete/reset button
+        let delButton = document.createElement("button");
+        delButton.innerText = "🗑️";
+        delButton.title = "Reset count";
+        tr.append(delButton);
+        
+        tagTable.append(tr)
+    });
+
+    return tagTable;
+}
 
 // Sliding window function to get possible combination groups of an array
 function toNgrams(inputArray, size) {
@@ -166,7 +312,11 @@ function toNgrams(inputArray, size) {
     );
 }
 
-function escapeRegExp(string) {
+function escapeRegExp(string, wildcardMatching = false) {
+    if (wildcardMatching) {
+        // Escape all characters except asterisks and ?, which should be treated separately as placeholders.
+        return string.replace(/[-[\]{}()+.,\\^$|#\s]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+    }
     return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
 }
 function escapeHTML(unsafeText) {
@@ -215,12 +365,19 @@ function getSortFunction() {
     let criterion = TAC_CFG.modelSortOrder || "Name";
 
     const textSort = (a, b, reverse = false) => {
-        const textHolderA = a.type === ResultType.chant ? a.aliases : a.text;
-        const textHolderB = b.type === ResultType.chant ? b.aliases : b.text;
+        // Assign keys so next sort is faster
+        if (!a.sortKey) {
+            a.sortKey = a.type === ResultType.chant
+                ? a.aliases
+                : a.text;
+        }
+        if (!b.sortKey) {
+            b.sortKey = b.type === ResultType.chant
+                ? b.aliases
+                : b.text;
+        }
 
-        const aKey = a.sortKey || textHolderA;
-        const bKey = b.sortKey || textHolderB;
-        return reverse ? bKey.localeCompare(aKey) : aKey.localeCompare(bKey);
+        return reverse ? b.sortKey.localeCompare(a.sortKey) : a.sortKey.localeCompare(b.sortKey);
     }
     const numericSort = (a, b, reverse = false) => {
         const noKey = reverse ? "-1" : Number.MAX_SAFE_INTEGER;

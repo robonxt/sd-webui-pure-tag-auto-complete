@@ -1,21 +1,45 @@
 # This helper script scans folders for wildcards and embeddings and writes them
 # to a temporary file to expose it to the javascript side
 
+import sys
 import glob
+import importlib
 import json
+import sqlite3
 import urllib.parse
 from pathlib import Path
 
 import gradio as gr
 import yaml
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import Response, FileResponse, JSONResponse
 from modules import script_callbacks, sd_hijack, shared, hashes
+from pydantic import BaseModel
 
 from scripts.model_keyword_support import (get_lora_simple_hash,
                                            load_hash_cache, update_hash_cache,
                                            write_model_keyword_path)
 from scripts.shared_paths import *
+
+try:
+    try:
+        from scripts import tag_frequency_db as tdb
+    except ModuleNotFoundError:
+        from inspect import getframeinfo, currentframe
+        filename = getframeinfo(currentframe()).filename
+        parent = Path(filename).resolve().parent
+        sys.path.append(str(parent))
+        import tag_frequency_db as tdb
+
+    # Ensure the db dependency is reloaded on script reload
+    importlib.reload(tdb)
+
+    db = tdb.TagFrequencyDb()
+    if int(db.version) != int(tdb.db_ver):
+        raise ValueError("Database version mismatch")
+except (ImportError, ValueError, sqlite3.Error) as e:
+    print(f"Tag Autocomplete: Tag frequency database error - \"{e}\"")
+    db = None
 
 # Attempt to get embedding load function, using the same call as api.
 try:
@@ -162,26 +186,41 @@ def get_embeddings(sd_model):
     emb_v1 = []
     emb_v2 = []
     emb_vXL = []
+    emb_unknown = []
     results = []
 
     try:
+        # The sd_model embedding_db reference only exists in sd.next with diffusers backend
+        try:
+            loaded_sdnext = sd_model.embedding_db.word_embeddings
+            skipped_sdnext = sd_model.embedding_db.skipped_embeddings
+        except (NameError, AttributeError):
+            loaded_sdnext = {}
+            skipped_sdnext = {}
+        
         # Get embedding dict from sd_hijack to separate v1/v2 embeddings
         loaded = sd_hijack.model_hijack.embedding_db.word_embeddings
         skipped = sd_hijack.model_hijack.embedding_db.skipped_embeddings
+        loaded = loaded | loaded_sdnext
+        skipped = skipped | skipped_sdnext
 
         # Add embeddings to the correct list
         for key, emb in (loaded | skipped).items():
-            if emb.filename is None or emb.shape is None:
+            if emb.filename is None:
                 continue
 
-            if emb.shape == V1_SHAPE:
-                emb_v1.append((Path(emb.filename), key, "v1"))
+            if emb.shape is None:
+                emb_unknown.append((Path(emb.filename), Path(emb.filename).relative_to(EMB_PATH).as_posix(), ""))
+            elif emb.shape == V1_SHAPE:
+                emb_v1.append((Path(emb.filename), Path(emb.filename).relative_to(EMB_PATH).as_posix(), "v1"))
             elif emb.shape == V2_SHAPE:
-                emb_v2.append((Path(emb.filename), key, "v2"))
+                emb_v2.append((Path(emb.filename), Path(emb.filename).relative_to(EMB_PATH).as_posix(), "v2"))
             elif emb.shape == VXL_SHAPE:
-                emb_vXL.append((Path(emb.filename), key, "vXL"))
+                emb_vXL.append((Path(emb.filename), Path(emb.filename).relative_to(EMB_PATH).as_posix(), "vXL"))
+            else:
+                emb_unknown.append((Path(emb.filename), Path(emb.filename).relative_to(EMB_PATH).as_posix(), ""))
 
-        results = sort_models(emb_v1) + sort_models(emb_v2) + sort_models(emb_vXL)
+        results = sort_models(emb_v1) + sort_models(emb_v2) + sort_models(emb_vXL) + sort_models(emb_unknown)
     except AttributeError:
         print("tag_autocomplete_helper: Old webui version or unrecognized model shape, using fallback for embedding completion.")
         # Get a list of all embeddings in the folder
@@ -272,13 +311,21 @@ except Exception as e:
     # print(f'Exception setting-up performant fetchers: {e}')
 
 
+def is_visible(p: Path) -> bool:
+    if getattr(shared.opts, "extra_networks_hidden_models", "When searched") != "Never":
+        return True
+    for part in p.parts:
+        if part.startswith('.'):
+            return False
+    return True
+
 def get_lora():
     """Write a list of all lora"""
     # Get hashes
     valid_loras = _get_lora()
     loras_with_hash = []
     for l in valid_loras:
-        if not l.exists() or not l.is_file():
+        if not l.exists() or not l.is_file() or not is_visible(l):
             continue
         name = l.relative_to(LORA_PATH).as_posix()
         if model_keyword_installed:
@@ -296,7 +343,7 @@ def get_lyco():
     valid_lycos = _get_lyco()
     lycos_with_hash = []
     for ly in valid_lycos:
-        if not ly.exists() or not ly.is_file():
+        if not ly.exists() or not ly.is_file() or not is_visible(ly):
             continue
         name = ly.relative_to(LYCO_PATH).as_posix()
         if model_keyword_installed:
@@ -307,6 +354,13 @@ def get_lyco():
     # Sort
     return sort_models(lycos_with_hash)
 
+def get_style_names():
+    try:
+        style_names: list[str] = shared.prompt_styles.styles.keys()
+        style_names = sorted(style_names, key=len, reverse=True)
+        return style_names
+    except Exception:
+        return None
 
 def write_tag_base_path():
     """Writes the tag base path to a fixed location temporary file"""
@@ -361,6 +415,7 @@ write_to_temp_file('umi_tags.txt', [])
 write_to_temp_file('hyp.txt', [])
 write_to_temp_file('lora.txt', [])
 write_to_temp_file('lyco.txt', [])
+write_to_temp_file('styles.txt', [])
 # Only reload embeddings if the file doesn't exist, since they are already re-written on model load
 if not TEMP_PATH.joinpath("emb.txt").exists():
     write_to_temp_file('emb.txt', [])
@@ -390,6 +445,11 @@ def refresh_temp_files(*args, **kwargs):
         WILDCARD_EXT_PATHS = find_ext_wildcard_paths()
     write_temp_files(skip_wildcard_refresh)
     refresh_embeddings(force=True)
+
+def write_style_names(*args, **kwargs):
+    styles = get_style_names()
+    if styles:
+        write_to_temp_file('styles.txt', styles)
 
 def write_temp_files(skip_wildcard_refresh = False):
     # Write wildcards to wc.txt if found
@@ -431,6 +491,8 @@ def write_temp_files(skip_wildcard_refresh = False):
     if model_keyword_installed:
         update_hash_cache()
 
+    if shared.prompt_styles is not None:
+        write_style_names()
 
 write_temp_files()
 
@@ -449,6 +511,13 @@ def on_ui_settings():
             self.label += " (Requires restart)"
             return self
         shared.OptionInfo.needs_restart = needs_restart
+
+    # Dictionary of function options and their explanations
+    frequency_sort_functions = {
+        "Logarithmic (weak)": "Will respect the base order and slightly prefer often used tags",
+        "Logarithmic (strong)": "Same as Logarithmic (weak), but with a stronger bias",
+        "Usage first": "Will list used tags by frequency before all others",
+    }
 
     tac_options = {
         # Main tag file
@@ -480,6 +549,14 @@ def on_ui_settings():
         "tac_showWikiLinks": shared.OptionInfo(False, "Show '?' next to tags, linking to its Danbooru or e621 wiki page").info("Warning: This is an external site and very likely contains NSFW examples!"),
         "tac_showExtraNetworkPreviews": shared.OptionInfo(True, "Show preview thumbnails for extra networks if available"),
         "tac_modelSortOrder": shared.OptionInfo("Name", "Model sort order", gr.Dropdown, lambda: {"choices": list(sort_criteria.keys())}).info("Order for extra network models and wildcards in dropdown"),
+        "tac_useStyleVars": shared.OptionInfo(False, "Search for webui style names").info("Suggests style names from the webui dropdown with '$'. Currently requires a secondary extension like <a href=\"https://github.com/SirVeggie/extension-style-vars\" target=\"_blank\">style-vars</a> to actually apply the styles before generating."),
+        # Frequency sorting settings
+        "tac_frequencySort": shared.OptionInfo(True, "Locally record tag usage and sort frequent tags higher").info("Will also work for extra networks, keeping the specified base order"),
+        "tac_frequencyFunction": shared.OptionInfo("Logarithmic (weak)", "Function to use for frequency sorting", gr.Dropdown, lambda: {"choices": list(frequency_sort_functions.keys())}).info("; ".join([f'<b>{key}</b>: {val}' for key, val in frequency_sort_functions.items()])),
+        "tac_frequencyMinCount": shared.OptionInfo(3, "Minimum number of uses for a tag to be considered frequent").info("Tags with less uses than this will not be sorted higher, even if the sorting function would normally result in a higher position."),
+        "tac_frequencyMaxAge": shared.OptionInfo(30, "Maximum days since last use for a tag to be considered frequent").info("Similar to the above, tags that haven't been used in this many days will not be sorted higher. Set to 0 to disable."),
+        "tac_frequencyRecommendCap": shared.OptionInfo(10, "Maximum number of recommended tags").info("Limits the maximum number of recommended tags to not drown out normal results. Set to 0 to disable."),
+        "tac_frequencyIncludeAlias": shared.OptionInfo(False, "Frequency sorting matches aliases for frequent tags").info("Tag frequency will be increased for the main tag even if an alias is used for completion. This option can be used to override the default behavior of alias results being ignored for frequency sorting."),
         # Insertion related settings
         "tac_replaceUnderscores": shared.OptionInfo(True, "Replace underscores with spaces on insertion"),
         "tac_escapeParentheses": shared.OptionInfo(True, "Escape parentheses on insertion"),
@@ -544,6 +621,20 @@ def on_ui_settings():
         "6": ["red", "maroon"],
         "7": ["whitesmoke", "black"],
         "8": ["seagreen", "darkseagreen"]
+    },
+    "derpibooru": {
+        "-1": ["red", "maroon"],
+        "0": ["#60d160", "#3d9d3d"],
+        "1": ["#fff956", "#918e2e"],
+        "3": ["#fd9961", "#a14c2e"],
+        "4": ["#cf5bbe", "#6c1e6c"],
+        "5": ["#3c8ad9", "#1e5e93"],
+        "6": ["#a6a6a6", "#555555"],
+        "7": ["#47abc1", "#1f6c7c"],
+        "8": ["#7871d0", "#392f7d"],
+        "9": ["#df3647", "#8e1c2b"],
+        "10": ["#c98f2b", "#7b470e"],
+        "11": ["#e87ebe", "#a83583"]
     }
 }\
 """
@@ -561,10 +652,25 @@ def on_ui_settings():
 
 script_callbacks.on_ui_settings(on_ui_settings)
 
+def get_style_mtime():
+    try:
+        style_file = getattr(shared, "styles_filename", "styles.csv")
+        # Check in case a list is returned
+        if isinstance(style_file, list):
+            style_file = style_file[0]
+        
+        style_file = Path(FILE_DIR).joinpath(style_file)
+        if Path.exists(style_file):
+            return style_file.stat().st_mtime
+    except Exception:
+        return None
+
+last_style_mtime = get_style_mtime()
+
 def api_tac(_: gr.Blocks, app: FastAPI):
     async def get_json_info(base_path: Path, filename: str = None):
         if base_path is None or (not base_path.exists()):
-            return JSONResponse({}, status_code=404)
+            return Response(status_code=404)
 
         try:
             json_candidates = glob.glob(base_path.as_posix() + f"/**/{filename}.json", recursive=True)
@@ -575,7 +681,7 @@ def api_tac(_: gr.Blocks, app: FastAPI):
 
     async def get_preview_thumbnail(base_path: Path, filename: str = None, blob: bool = False):
         if base_path is None or (not base_path.exists()):
-            return JSONResponse({}, status_code=404)
+            return Response(status_code=404)
 
         try:
             img_glob = glob.glob(base_path.as_posix() + f"/**/{filename}.*", recursive=True)
@@ -639,20 +745,91 @@ def api_tac(_: gr.Blocks, app: FastAPI):
     @app.get("/tacapi/v1/wildcard-contents")
     async def get_wildcard_contents(basepath: str, filename: str):
         if basepath is None or basepath == "":
-            return JSONResponse({}, status_code=404)
+            return Response(status_code=404)
 
         base = Path(basepath)
         if base is None or (not base.exists()):
-            return JSONResponse({}, status_code=404)
+            return Response(status_code=404)
 
         try:
             wildcard_path = base.joinpath(filename)
             if wildcard_path.exists() and wildcard_path.is_file():
                 return FileResponse(wildcard_path)
             else:
-                return JSONResponse({}, status_code=404)
+                return Response(status_code=404)
         except Exception as e:
             return JSONResponse({"error": e}, status_code=500)
 
+    @app.get("/tacapi/v1/refresh-styles-if-changed")
+    async def refresh_styles_if_changed():
+        global last_style_mtime
+        
+        mtime = get_style_mtime()
+        if mtime is not None and mtime > last_style_mtime:
+            last_style_mtime = mtime
+            # Update temp file
+            if shared.prompt_styles is not None:
+                write_style_names()
+            
+            return Response(status_code=200) # Success
+        else:
+            return Response(status_code=304) # Not modified
+    def db_request(func, get = False):
+        if db is not None:
+            try:
+                if get:
+                    ret = func()
+                    if ret is list:
+                        ret = [{"name": t[0], "type": t[1], "count": t[2], "lastUseDate": t[3]} for t in ret]
+                    return JSONResponse({"result": ret})
+                else:
+                    func()
+            except sqlite3.Error as e:
+                return JSONResponse({"error": e.__cause__}, status_code=500)
+        else:
+            return JSONResponse({"error": "Database not initialized"}, status_code=500)
 
+    @app.post("/tacapi/v1/increase-use-count")
+    async def increase_use_count(tagname: str, ttype: int, neg: bool):
+        db_request(lambda: db.increase_tag_count(tagname, ttype, neg))
+
+    @app.get("/tacapi/v1/get-use-count")
+    async def get_use_count(tagname: str, ttype: int, neg: bool):
+        return db_request(lambda: db.get_tag_count(tagname, ttype, neg), get=True)
+    
+    # Small dataholder class
+    class UseCountListRequest(BaseModel):
+        tagNames: list[str]
+        tagTypes: list[int]
+        neg: bool = False
+
+    # Semantically weird to use post here, but it's required for the body on js side
+    @app.post("/tacapi/v1/get-use-count-list")
+    async def get_use_count_list(body: UseCountListRequest):
+        # If a date limit is set > 0, pass it to the db
+        date_limit = getattr(shared.opts, "tac_frequencyMaxAge", 30)
+        date_limit = date_limit if date_limit > 0 else None
+
+        if db:
+            count_list = list(db.get_tag_counts(body.tagNames, body.tagTypes, body.neg, date_limit))
+        else:
+            count_list = None
+    
+        # If a limit is set, return at max the top n results by count
+        if count_list and len(count_list):
+            limit = int(min(getattr(shared.opts, "tac_frequencyRecommendCap", 10), len(count_list)))
+            # Sort by count and return the top n
+            if limit > 0:
+                count_list = sorted(count_list, key=lambda x: x[2], reverse=True)[:limit]
+
+        return db_request(lambda: count_list, get=True)
+
+    @app.put("/tacapi/v1/reset-use-count")
+    async def reset_use_count(tagname: str, ttype: int, pos: bool, neg: bool):
+        db_request(lambda: db.reset_tag_count(tagname, ttype, pos, neg))
+
+    @app.get("/tacapi/v1/get-all-use-counts")
+    async def get_all_tag_counts():
+        return db_request(lambda: db.get_all_tags(), get=True)
+        
 script_callbacks.on_app_started(api_tac)
