@@ -241,6 +241,7 @@ async function syncOptions() {
         wildcardCompletionMode: opts["tac_wildcardCompletionMode"],
         modelKeywordCompletion: opts["tac_modelKeywordCompletion"],
         modelKeywordLocation: opts["tac_modelKeywordLocation"],
+        wcWrap: opts["dp_parser_wildcard_wrap"] || "__", // to support custom wrapper chars set by dp_parser
         // Alias settings
         alias: {
             searchByAlias: opts["tac_alias.searchByAlias"],
@@ -413,7 +414,7 @@ const COMPLETED_WILDCARD_REGEX = /__[^\s,_][^\t\n\r,_]*[^\s,_]__[^\s,_]*/g;
 const STYLE_VAR_REGEX = /\$\(?[^$|\[\],\s]*\)?/g;
 const NORMAL_TAG_REGEX = /[^\s,|<>\[\]:]+_\([^\s,|<>\[\]:]*\)?|[^\s,|<>():\[\]]+|</g;
 const RUBY_TAG_REGEX = /[\w\d<][\w\d' \-?!/$%]{2,}>?/g;
-const TAG_REGEX = new RegExp(`${POINTY_REGEX.source}|${COMPLETED_WILDCARD_REGEX.source}|${STYLE_VAR_REGEX.source}|${NORMAL_TAG_REGEX.source}`, "g");
+const TAG_REGEX = () => { return new RegExp(`${POINTY_REGEX.source}|${COMPLETED_WILDCARD_REGEX.source.replaceAll("__", escapeRegExp(TAC_CFG.wcWrap))}|${STYLE_VAR_REGEX.source}|${NORMAL_TAG_REGEX.source}`, "g"); }
 
 // On click, insert the tag into the prompt textbox with respect to the cursor position
 async function insertTextAtCursor(textArea, result, tagword, tabCompletedWithoutChoice = false) {
@@ -469,7 +470,7 @@ async function insertTextAtCursor(textArea, result, tagword, tabCompletedWithout
             // Don't cut off the __ at the end if it is already the full path
             if (firstDifference > 0 && firstDifference < longestResult) {
                 // +2 because the sanitized text already has the __ at the start but the matched text doesn't
-                sanitizedText = sanitizedText.substring(0, firstDifference + 2);
+                sanitizedText = sanitizedText.substring(0, firstDifference + TAC_CFG.wcWrap.length);
             } else if (firstDifference === 0) {
                 sanitizedText = tagword;
             }
@@ -484,7 +485,7 @@ async function insertTextAtCursor(textArea, result, tagword, tabCompletedWithout
             case ResultType.wildcardFile:
             case ResultType.yamlWildcard:
                 // We only want to update the frequency for a full wildcard, not partial paths
-                if (sanitizedText.endsWith("__"))
+                if (sanitizedText.endsWith(TAC_CFG.wcWrap))
                     name = text
                 break;
             case ResultType.chant:
@@ -622,7 +623,7 @@ async function insertTextAtCursor(textArea, result, tagword, tabCompletedWithout
     // Update previous tags with the edited prompt to prevent re-searching the same term
     let weightedTags = [...newPrompt.matchAll(WEIGHT_REGEX)]
             .map(match => match[1]);
-    let tags = newPrompt.match(TAG_REGEX)
+    let tags = newPrompt.match(TAG_REGEX())
     if (weightedTags !== null) {
         tags = tags.filter(tag => !weightedTags.some(weighted => tag.includes(weighted)))
             .concat(weightedTags);
@@ -818,7 +819,7 @@ function addResultsToList(textArea, results, tagword, resetList) {
         // Check if it's a negative prompt
         let isNegative = textAreaId.includes("n");
 
-        // Add listener
+        // Add click listener
         li.addEventListener("click", (e) => {
             if (e.ctrlKey || e.metaKey) {
                 resetUseCount(result.text, result.type, !isNegative, isNegative);
@@ -827,6 +828,38 @@ function addResultsToList(textArea, results, tagword, resetList) {
                 insertTextAtCursor(textArea, result, tagword);
             }
         });
+        // Add delayed hover listener for extra network previews
+        if (
+            TAC_CFG.showExtraNetworkPreviews &&
+            [
+                ResultType.embedding,
+                ResultType.hypernetwork,
+                ResultType.lora,
+                ResultType.lyco,
+            ].includes(result.type)
+        ) {
+            li.addEventListener("mouseover", async () => {
+                const me = this;
+                let hoverTimeout;
+
+                hoverTimeout = setTimeout(async () => {
+                    // If the tag we hover over is already selected, do nothing
+                    if (selectedTag && selectedTag === i) return;
+
+                    oldSelectedTag = selectedTag;
+                    selectedTag = i;
+
+                    // Update selection without scrolling to the item (since we would
+                    // immediately trigger the next scroll as the items move under the cursor)
+                    updateSelectionStyle(textArea, selectedTag, oldSelectedTag, false);
+                }, 400);
+                // Reset delay timer if we leave the item
+                me.addEventListener("mouseout", () => {
+                    clearTimeout(hoverTimeout);
+                });
+            });
+        }
+
         // Add element to list
         resultsList.appendChild(li);
     }
@@ -839,7 +872,7 @@ function addResultsToList(textArea, results, tagword, resetList) {
     }
 }
 
-async function updateSelectionStyle(textArea, newIndex, oldIndex) {
+async function updateSelectionStyle(textArea, newIndex, oldIndex, scroll = true) {
     let textAreaId = getTextAreaIdentifier(textArea);
     let resultDiv = gradioApp().querySelector('.autocompleteResults' + textAreaId);
     let resultsList = resultDiv.querySelector('ul');
@@ -854,8 +887,8 @@ async function updateSelectionStyle(textArea, newIndex, oldIndex) {
         let selected = items[newIndex];
         selected.classList.add('selected');
 
-         // Set scrolltop to selected item
-        resultDiv.scrollTop = selected.offsetTop - resultDiv.offsetTop;
+        // Set scrolltop to selected item
+        if (scroll) resultDiv.scrollTop = selected.offsetTop - resultDiv.offsetTop;
     }
 
     // Show preview if enabled and the selected type supports it
@@ -1040,7 +1073,7 @@ async function autocomplete(textArea, prompt, fixedTag = null) {
         // We also match for the weighting format (e.g. "tag:1.0") here, and combine the two to get the full tag word set
         let weightedTags = [...prompt.matchAll(WEIGHT_REGEX)]
             .map(match => match[1]);
-        let tags = prompt.match(TAG_REGEX)
+        let tags = prompt.match(TAG_REGEX())
         if (weightedTags !== null && tags !== null) {
             tags = tags.filter(tag => !weightedTags.some(weighted => tag.includes(weighted) && !tag.startsWith("<[") && !tag.startsWith("$(")))
                 .concat(weightedTags);
@@ -1450,9 +1483,16 @@ async function setup() {
     gradioApp().querySelector("#refresh_tac_refreshTempFiles")?.addEventListener("click", refreshTacTempFiles);
 
     // Also add listener for external network refresh button (plus triggering python code)
-    ["#img2img_extra_refresh", "#txt2img_extra_refresh"].forEach(e => {
-        gradioApp().querySelector(e)?.addEventListener("click", ()=>{
-            refreshTacTempFiles(true);
+    let alreadyAdded = new Set();
+    ["#img2img_extra_refresh", "#txt2img_extra_refresh", ".extra-network-control--refresh"].forEach(e => {
+        const elems = gradioApp().querySelectorAll(e);
+        elems.forEach(elem => {
+            if (!elem || alreadyAdded.has(elem)) return;
+
+            alreadyAdded.add(elem);
+            elem.addEventListener("click", ()=>{
+                refreshTacTempFiles(true);
+            });
         });
     })
 
